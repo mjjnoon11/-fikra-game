@@ -4,6 +4,7 @@ let selectedCategory='علوم واكتشافات',selectedMode='فردي',displ
 let roomState=null,roomCode='',playerId=localStorage.getItem('fikraPlayerId');
 if(!playerId){playerId='p_'+crypto.randomUUID();localStorage.setItem('fikraPlayerId',playerId)}
 let roomPoll=null,questionClock=null,answeredThisQuestion=false,currentQ=0,score=0,gameQuestions=[],gameCategory='',lastReactionSeen=0,gameReview=[];
+let quizDraft=null,participantQuiz=null,participantName='';
 const $=s=>document.querySelector(s),overlay=$('#overlay'),modal=$('#modal');
 $('#profileName').textContent=displayName;$('#helloName').textContent=displayName==='لاعب فضولي'?'يا فضولي':displayName;
 
@@ -33,6 +34,120 @@ function reviewHtml(){
 
 /* ===== إعادة اللعب (المضيف) ===== */
 async function rematchGame(){if(roomState?.hostId!==playerId){toast('إعادة اللعب متاحة للمضيف فقط');return}selectedCategory=roomState.category;selectedMode=roomState.mode;closeModal();await createQuickChallenge()}
+
+/* ===== اختبار تعليمي مخصّص (للمعلّم) ===== */
+function newQuizQuestion(){return{id:'q'+Math.random().toString(36).slice(2,9),q:'',options:['','','',''],correct:0,img:''}}
+function myQuizzes(){try{return JSON.parse(localStorage.getItem('fikraMyQuizzes')||'[]')}catch(e){return[]}}
+function saveMyQuiz(code,title){try{const list=myQuizzes().filter(x=>x.code!==code);list.unshift({code,title,createdAt:Date.now()});localStorage.setItem('fikraMyQuizzes',JSON.stringify(list.slice(0,40)))}catch(e){}}
+function quizBuilderModal(){quizDraft=quizDraft||{title:'',questions:[newQuizQuestion()]};renderQuizBuilder()}
+function syncQuizDraftFromDOM(){
+  if(!quizDraft)return;
+  const t=$('#quizTitle');if(t)quizDraft.title=t.value;
+  quizDraft.questions.forEach(qq=>{
+    const qEl=$('#qz_q_'+qq.id);if(qEl)qq.q=qEl.value;
+    qq.options=qq.options.map((o,i)=>{const oEl=$('#qz_o_'+qq.id+'_'+i);return oEl?oEl.value:o});
+    const imgEl=$('#qz_img_'+qq.id);if(imgEl)qq.img=imgEl.value;
+    const checked=document.querySelector(`input[name="qz_c_${qq.id}"]:checked`);if(checked)qq.correct=Number(checked.value);
+  });
+}
+function addQuizQuestion(){syncQuizDraftFromDOM();quizDraft.questions.push(newQuizQuestion());renderQuizBuilder()}
+function removeQuizQuestion(id){syncQuizDraftFromDOM();quizDraft.questions=quizDraft.questions.filter(x=>x.id!==id);if(!quizDraft.questions.length)quizDraft.questions.push(newQuizQuestion());renderQuizBuilder()}
+function renderQuizBuilder(){
+  overlay.classList.add('show');
+  modal.innerHTML=`<div class="modal-head"><div><h2>اختبار تعليمي مخصّص 📝</h2><p>أضف أسئلتك الخاصة، شارك الرابط مع الطلاب، وصدّر نتائجهم بعد إدخال أسمائهم.</p></div><button class="close" onclick="closeModal()">×</button></div><label class="field-label">عنوان الاختبار</label><input id="quizTitle" class="input" placeholder="مثال: اختبار الوحدة الثالثة" value="${escapeHtml(quizDraft.title)}"><div class="quiz-q-list">${quizDraft.questions.map((qq,qi)=>`<div class="quiz-q-card"><div class="quiz-q-head"><b>السؤال ${ar(qi+1)}</b>${quizDraft.questions.length>1?`<button class="mini-btn danger" onclick="removeQuizQuestion('${qq.id}')">حذف</button>`:''}</div><input id="qz_q_${qq.id}" class="input" placeholder="نص السؤال" value="${escapeHtml(qq.q)}"><input id="qz_img_${qq.id}" class="input qz-icon" placeholder="رمز اختياري 🧪" maxlength="4" value="${escapeHtml(qq.img||'')}"><div class="quiz-opts">${qq.options.map((op,oi)=>`<div class="quiz-opt-row"><input type="radio" name="qz_c_${qq.id}" value="${oi}" ${qq.correct===oi?'checked':''} title="حدّد الإجابة الصحيحة"><input id="qz_o_${qq.id}_${oi}" class="input" placeholder="اختيار ${ar(oi+1)}" value="${escapeHtml(op)}"></div>`).join('')}</div><div style="font-size:10.5px;color:var(--muted);margin-top:4px">اختر الدائرة بجانب الإجابة الصحيحة</div></div>`).join('')}</div><button class="mini-btn" style="width:100%;margin-top:10px" onclick="addQuizQuestion()">+ أضف سؤالاً</button><div class="modal-footer"><button class="btn secondary" onclick="quizDraft=null;closeModal()">إلغاء</button><button class="btn" onclick="saveQuiz()">انشر الاختبار وشاركه ←</button></div>`;
+}
+async function saveQuiz(){
+  syncQuizDraftFromDOM();
+  const title=(quizDraft.title||'').trim()||'اختبار';
+  const questions=[];
+  for(const qq of quizDraft.questions){
+    const q=(qq.q||'').trim();
+    const optsRaw=qq.options.map(o=>(o||'').trim());
+    const keepIdx=[],options=[];
+    optsRaw.forEach((o,i)=>{if(o){options.push(o);keepIdx.push(i)}});
+    if(!q||options.length<2)continue;
+    let correct=keepIdx.indexOf(qq.correct);if(correct===-1)correct=0;
+    questions.push({q,options,correct,img:(qq.img||'').trim().slice(0,4)});
+  }
+  if(!questions.length){toast('أضف سؤالاً واحداً صحيحاً على الأقل (نص السؤال وخياران على الأقل)');return}
+  try{
+    const quiz=await api('/api/quizzes',{method:'POST',body:JSON.stringify({creatorId:playerId,title,questions})});
+    saveMyQuiz(quiz.code,quiz.title);
+    quizDraft=null;
+    quizInviteModal(quiz);
+  }catch(e){toast(e.message)}
+}
+function quizUrl(code){const u=new URL(location.pathname,location.origin);u.searchParams.set('quiz',code);return u.toString()}
+function quizInviteModal(quiz){
+  overlay.classList.add('show');
+  const link=quizUrl(quiz.code),titleEsc=(quiz.title||'').replace(/'/g,"\\'");
+  modal.innerHTML=`<div class="modal-head"><div><h2>الاختبار جاهز! 🎉</h2><p>${escapeHtml(quiz.title)} · شارك الرابط مع طلابك</p></div><button class="close" onclick="closeModal()">×</button></div><button class="big-share-btn" onclick="shareQuizInvite('auto','${quiz.code}','${titleEsc}')">📤 شارك رابط الاختبار الآن</button><label class="field-label">رابط الاختبار</label><div class="codebox" style="gap:10px"><span dir="ltr" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">${escapeHtml(link)}</span><button class="mini-btn" onclick="copyText('${link}')">نسخ الرابط</button></div><div style="font-size:11px;color:var(--muted);margin-top:-6px">كل من يفتح الرابط يُدخل اسمه ويبدأ الاختبار مباشرة — نتيجته تظهر له فوراً، وتُحفظ لك لتصديرها.</div><div class="qr-wrap"><div class="qr-box" id="qzQrBox"></div><div class="qr-hint">امسح الرمز بكاميرا الجوال لفتح الاختبار مباشرة</div></div><div class="modal-footer"><button class="btn secondary" onclick="quizResultsModal('${quiz.code}')">عرض النتائج</button><button class="btn" onclick="closeModal()">تم</button></div>`;
+  renderQuizQR(quiz.code);
+}
+function renderQuizQR(code){
+  const box=$('#qzQrBox');if(!box)return;box.innerHTML='';
+  if(typeof QRCode==='undefined'){box.remove();const wrap=document.querySelectorAll('.qr-wrap');if(wrap[wrap.length-1])wrap[wrap.length-1].remove();return}
+  try{new QRCode(box,{text:quizUrl(code),width:148,height:148,colorDark:'#173f38',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.M})}catch(e){const wrap=document.querySelectorAll('.qr-wrap');if(wrap[wrap.length-1])wrap[wrap.length-1].remove()}
+}
+function shareQuizInvite(kind,code,title){
+  const link=quizUrl(code);
+  const msg=`📝 دعوة لأداء اختبار: ${title}\nافتح الرابط وابدأ: ${link}`;
+  if((kind==='auto'||kind==='native')&&navigator.share){navigator.share({title:'دعوة لاختبار',text:msg,url:link}).catch(e=>{if(e.name!=='AbortError')copyText(msg)});return}
+  if(kind==='auto'||kind==='whatsapp'){openWhatsApp('https://wa.me/?text='+encodeURIComponent(msg),msg);return}
+  copyText(msg);
+}
+function myQuizzesModal(){
+  const list=myQuizzes();
+  overlay.classList.add('show');
+  modal.innerHTML=`<div class="modal-head"><div><h2>اختباراتي 📝</h2><p>الاختبارات التي أنشأتها من هذا الجهاز.</p></div><button class="close" onclick="closeModal()">×</button></div>${list.length?`<div class="quiz-list">${list.map(x=>{const t=escapeHtml(x.title),tEsc=(x.title||'').replace(/'/g,"\\'");return`<div class="quiz-list-row"><div><strong>${t}</strong><small>الرمز: ${x.code}</small></div><div style="display:flex;gap:6px"><button class="mini-btn" onclick="quizInviteModal({code:'${x.code}',title:'${tEsc}'})">الدعوة</button><button class="mini-btn" onclick="quizResultsModal('${x.code}')">النتائج</button></div></div>`}).join('')}</div>`:`<p style="color:var(--muted);font-size:13px">لم تُنشئ اختباراً بعد. أنشئ أول اختبار وشاركه مع طلابك.</p>`}<div class="modal-footer"><button class="btn secondary" onclick="closeModal()">إغلاق</button><button class="btn" onclick="quizDraft=null;quizBuilderModal()">+ اختبار جديد</button></div>`;
+}
+async function quizResultsModal(code){
+  overlay.classList.add('show');
+  modal.innerHTML=`<div class="modal-head"><div><h2>نتائج الاختبار</h2><p>جارٍ التحميل…</p></div><button class="close" onclick="closeModal()">×</button></div>`;
+  try{
+    const data=await api(`/api/quizzes/${encodeURIComponent(code)}/results?creatorId=${encodeURIComponent(playerId)}`);
+    const rows=data.submissions||[],titleEsc=(data.title||'').replace(/'/g,"\\'");
+    modal.innerHTML=`<div class="modal-head"><div><h2>${escapeHtml(data.title)}</h2><p>${ar(rows.length)} مشاركاً · ${ar(data.questionCount)} سؤالاً</p></div><button class="close" onclick="closeModal()">×</button></div>${rows.length?`<div class="quiz-results-list">${rows.map((s,i)=>`<div class="quiz-result-row"><span class="num">${ar(i+1)}</span><strong>${escapeHtml(s.name)}</strong><span>${ar(s.score)} / ${ar(s.total)}</span></div>`).join('')}</div>`:`<p style="color:var(--muted);font-size:13px">لا توجد نتائج بعد — شارك الرابط مع الطلاب أولاً.</p>`}<div class="modal-footer"><button class="btn secondary" onclick="quizInviteModal({code:'${code}',title:'${titleEsc}'})">رابط الدعوة</button><button class="btn" onclick="exportQuizResults('${code}')">⬇ تصدير النتائج CSV</button></div>`;
+  }catch(e){toast(e.message);closeModal()}
+}
+function exportQuizResults(code){
+  const url=`/api/quizzes/${encodeURIComponent(code)}/export?creatorId=${encodeURIComponent(playerId)}`;
+  const a=document.createElement('a');a.href=url;a.rel='noopener';document.body.appendChild(a);a.click();a.remove();
+}
+
+/* ===== اختبار تعليمي مخصّص (للمشارك/الطالب) ===== */
+async function openQuizForParticipant(code){
+  try{const quiz=await api(`/api/quizzes/${encodeURIComponent(code)}`);quizNameModal(quiz)}
+  catch(e){toast(e.message)}
+}
+function quizNameModal(quiz){
+  participantQuiz=quiz;
+  overlay.classList.add('show');
+  modal.innerHTML=`<div class="modal-head"><div><h2>${escapeHtml(quiz.title)} 📝</h2><p>اختبار من ${ar(quiz.questionCount)} سؤالاً. أدخل اسمك للبدء.</p></div><button class="close" onclick="closeModal()">×</button></div><label class="field-label">اسمك</label><input id="quizNameInput" class="input" placeholder="اكتب اسمك الكامل" value="${escapeHtml(displayName==='لاعب فضولي'?'':displayName)}" maxlength="40"><div class="modal-footer"><button class="btn secondary" onclick="closeModal();history.replaceState(null,'',location.pathname)">إلغاء</button><button class="btn" onclick="startQuizTaking()">ابدأ الاختبار ←</button></div>`;
+}
+function startQuizTaking(){
+  const input=$('#quizNameInput'),name=input.value.trim();
+  if(!name){toast('أدخل اسمك أولاً');input.focus();return}
+  quizTakeModal(participantQuiz,name);
+}
+function quizTakeModal(quiz,name){
+  participantQuiz=quiz;participantName=name;
+  overlay.classList.add('show');
+  modal.innerHTML=`<div class="modal-head"><div><h2>${escapeHtml(quiz.title)}</h2><p>مرحباً ${escapeHtml(name)}، أجب عن ${ar(quiz.questionCount)} سؤالاً ثم اضغط "إرسال الإجابات".</p></div></div><div class="quiz-take-list">${quiz.questions.map((q,qi)=>`<div class="quiz-q-card"><div class="quiz-q-head"><b>${ar(qi+1)}. ${escapeHtml(q.q)}</b></div>${q.img?`<div class="qimg" style="font-size:40px">${escapeHtml(q.img)}</div>`:''}<div class="quiz-take-opts">${q.options.map((op,oi)=>`<label class="quiz-take-opt"><input type="radio" name="take_${qi}" value="${oi}">${escapeHtml(op)}</label>`).join('')}</div></div>`).join('')}</div><div class="modal-footer"><button class="btn secondary" onclick="closeModal();history.replaceState(null,'',location.pathname)">إلغاء</button><button class="btn" onclick="submitQuizAnswers()">إرسال الإجابات ←</button></div>`;
+}
+async function submitQuizAnswers(){
+  if(!participantQuiz)return;
+  const answers=participantQuiz.questions.map((q,qi)=>{const sel=document.querySelector(`input[name="take_${qi}"]:checked`);return sel?Number(sel.value):null});
+  try{
+    const res=await api(`/api/quizzes/${encodeURIComponent(participantQuiz.code)}/submit`,{method:'POST',body:JSON.stringify({name:participantName,answers})});
+    quizResultScreen(res);
+  }catch(e){toast(e.message)}
+}
+function quizResultScreen(res){
+  overlay.classList.add('show');
+  const pct=res.total?Math.round(res.score/res.total*100):0;
+  modal.innerHTML=`<div class="game-end"><div class="trophy">${pct>=50?'🏆':'📝'}</div><h2>انتهى الاختبار!</h2><p>نتيجتك: ${ar(res.score)} من ${ar(res.total)} (${ar(pct)}٪)</p><details class="review-wrap"><summary>📋 مراجعة إجاباتك</summary><div class="review-list">${res.details.map((d,i)=>`<div class="review-row ${d.correct?'good':'bad'}"><span class="rv-icon">${d.correct?'✅':'❌'}</span><div class="rv-body"><div class="rv-q">${ar(i+1)}. ${escapeHtml(participantQuiz.questions[i].q)}</div><div class="rv-ans">${d.yourIndex===null?'لم تُجب':`إجابتك: ${escapeHtml(participantQuiz.questions[i].options[d.yourIndex]||'')}`}${!d.correct?` — الصحيح: ${escapeHtml(participantQuiz.questions[i].options[d.correctIndex]||'')}`:''}</div></div></div>`).join('')}</div></details><div class="modal-footer"><button class="btn" onclick="closeModal();history.replaceState(null,'',location.pathname)">تم</button></div></div>`;
+}
 function speak(text,lang='ar-SA',rate=1){if(!soundsOn)return;if(!('speechSynthesis' in window))return;try{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang=lang;u.rate=rate;speechSynthesis.speak(u)}catch(e){}}
 const CORRECT_PHRASES=['أحسنت!','ممتاز!','إجابة صحيحة!','رائع!','موفّق!'];
 const WRONG_PHRASES=['حظ أوفر!','ليست هذه المرة','حاول في القادمة'];
@@ -46,7 +161,7 @@ function handleIncomingReactions(){if(!roomState||!roomState.reactions)return;co
 function reactionBarHtml(){return `<div class="reaction-bar">${REACTION_SET.map(e=>`<button class="reaction-btn" onclick="sendReaction('${e}')">${e}</button>`).join('')}</div>`}
 async function api(path,options={}){const res=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});let data={};try{data=await res.json()}catch{}if(!res.ok)throw new Error(data.error||'تعذّر الاتصال بالخادم.');return data}
 function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('show');clearTimeout(toast._t);toast._t=setTimeout(()=>el.classList.remove('show'),3200)}
-function openModal(type){overlay.classList.add('show');if(type==='new')newModal();if(type==='join')joinModal();if(type==='invite')inviteModal(false);if(type==='profile')profileModal();if(type==='help')helpModal();if(type==='learn')learnModal()}
+function openModal(type){overlay.classList.add('show');if(type==='new')newModal();if(type==='join')joinModal();if(type==='invite')inviteModal(false);if(type==='profile')profileModal();if(type==='help')helpModal();if(type==='learn')learnModal();if(type==='quizzes')myQuizzesModal()}
 
 let learnSet='words',learnIndex=0,learnFlipped=false,learnDone=new Set();
 function learnCards(){return (window.fikraLearn&&window.fikraLearn[learnSet])||[]}
@@ -162,4 +277,7 @@ async function autoJoinFromLink(code){
     openModal('join');$('#joinCode').value=code.toUpperCase();toast(e.message);
   }
 }
-const joinParam=new URLSearchParams(location.search).get('join');if(joinParam){setTimeout(()=>autoJoinFromLink(joinParam.toUpperCase()),150)}else restoreRoom();
+const urlParams=new URLSearchParams(location.search);const joinParam=urlParams.get('join');const quizParam=urlParams.get('quiz');
+if(quizParam){setTimeout(()=>openQuizForParticipant(quizParam.toUpperCase()),150)}
+else if(joinParam){setTimeout(()=>autoJoinFromLink(joinParam.toUpperCase()),150)}
+else restoreRoom();
