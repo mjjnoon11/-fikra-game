@@ -24,9 +24,15 @@ function tick(room) {
     else{room.questionStartedAt=now;room.deadline=now+QUESTION_SECONDS*1000;}
   }
 }
+const REACTION_EMOJIS = new Set(['👏','😂','🔥','😮','👎','❤️','🎉','🤔']);
+function pruneReactions(room) {
+  const cutoff = Date.now() - 15000;
+  room.reactions = (room.reactions||[]).filter(r=>r.at>=cutoff).slice(-12);
+}
 function safeRoom(room, playerId) {
   tick(room);
-  return {code:room.code,category:room.category,mode:room.mode,hostId:room.hostId,status:room.status,questionIndex:room.questionIndex,questionCount:room.questionCount,stageSize:room.stageSize,stageNumber:Math.floor(room.questionIndex/room.stageSize)+1,questionStartedAt:room.questionStartedAt,deadline:room.deadline,players:room.players.map(p=>({id:p.id,name:p.name,score:p.score,team:p.team,isHost:p.id===room.hostId,answered:!!room.answers[p.id]})),myPlayerId:playerId||null};
+  pruneReactions(room);
+  return {code:room.code,category:room.category,mode:room.mode,hostId:room.hostId,status:room.status,questionIndex:room.questionIndex,questionCount:room.questionCount,stageSize:room.stageSize,stageNumber:Math.floor(room.questionIndex/room.stageSize)+1,questionStartedAt:room.questionStartedAt,deadline:room.deadline,players:room.players.map(p=>({id:p.id,name:p.name,score:p.score,team:p.team,isHost:p.id===room.hostId,answered:!!room.answers[p.id]})),myPlayerId:playerId||null,reactions:room.reactions,reactionSeq:room.reactionSeq||0};
 }
 function sendError(res,status,message){json(res,status,{error:message});}
 const server=http.createServer(async(req,res)=>{
@@ -38,10 +44,10 @@ const server=http.createServer(async(req,res)=>{
       const b=await readBody(req); const id=String(b.playerId||'').slice(0,80); if(!id)return sendError(res,400,'معرّف اللاعب مطلوب');
       let code; do{code=makeCode()}while(rooms.has(code));
       const host={id,name:String(b.name||'لاعب فضولي').trim().slice(0,24)||'لاعب فضولي',score:0,team:b.mode==='فرق'?'الفريق ١':null};
-      const room={code,category:String(b.category||'علوم واكتشافات').slice(0,50),mode:b.mode==='فرق'?'فرق':'فردي',hostId:id,players:[host],status:'waiting',questionIndex:0,questionCount:Math.max(1,Math.min(100,Number(b.questionCount)||20)),stageSize:Math.max(2,Math.min(10,Number(b.stageSize)||5)),questionStartedAt:0,deadline:0,answers:{},allAnsweredAt:0,createdAt:Date.now()};rooms.set(code,room);
+      const room={code,category:String(b.category||'علوم واكتشافات').slice(0,50),mode:b.mode==='فرق'?'فرق':'فردي',hostId:id,players:[host],status:'waiting',questionIndex:0,questionCount:Math.max(1,Math.min(100,Number(b.questionCount)||20)),stageSize:Math.max(2,Math.min(10,Number(b.stageSize)||5)),questionStartedAt:0,deadline:0,answers:{},allAnsweredAt:0,createdAt:Date.now(),reactions:[],reactionSeq:0};rooms.set(code,room);
       return json(res,201,safeRoom(room,id));
     }
-    const match=url.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)(?:\/(join|start|answer|continue|leave))?$/i);
+    const match=url.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)(?:\/(join|start|answer|continue|leave|react))?$/i);
     if(match){const code=match[1].toUpperCase(), action=match[2]||'';const room=rooms.get(code);if(!room)return sendError(res,404,'لم نعثر على تحدٍّ بهذا الرمز. اطلب من المضيف إنشاء تحدٍ جديد.');
       if(req.method==='GET'&&!action)return json(res,200,safeRoom(room,url.searchParams.get('playerId')));
       if(req.method==='POST'&&action==='join'){
@@ -60,6 +66,17 @@ const server=http.createServer(async(req,res)=>{
         const b=await readBody(req);tick(room);if(room.status!=='playing')return sendError(res,409,'هذه الجولة انتهت.');if(Number(b.questionIndex)!==room.questionIndex)return sendError(res,409,'انتقلت اللعبة إلى السؤال التالي.');const player=room.players.find(p=>p.id===b.playerId);if(!player)return sendError(res,403,'انضم إلى اللعبة أولاً.');
         if(!room.answers[player.id]){const correct=!!b.correct;const points=correct?Math.max(10,Math.min(100,Number(b.points)||10)):0;room.answers[player.id]={correct,points};player.score+=points;if(room.players.every(p=>room.answers[p.id]))room.allAnsweredAt=Date.now();}
         return json(res,200,{ok:true,correct:room.answers[player.id].correct,points:room.answers[player.id].points,score:player.score,room:safeRoom(room,player.id)});
+      }
+      if(req.method==='POST'&&action==='react'){
+        const b=await readBody(req),id=String(b.playerId||'');
+        const player=room.players.find(p=>p.id===id);
+        if(!player)return sendError(res,403,'انضم إلى اللعبة أولاً.');
+        const emoji=REACTION_EMOJIS.has(b.emoji)?b.emoji:'👏';
+        pruneReactions(room);
+        room.reactionSeq=(room.reactionSeq||0)+1;
+        room.reactions.push({id:room.reactionSeq,playerId:id,name:player.name,emoji,at:Date.now()});
+        room.reactions=room.reactions.slice(-12);
+        return json(res,200,{ok:true});
       }
       if(req.method==='POST'&&action==='leave'){
         const b=await readBody(req),id=String(b.playerId||'');
