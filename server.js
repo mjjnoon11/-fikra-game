@@ -42,10 +42,13 @@ function recordLeaderboardResult(room) {
   if (leaderboard.length > 20000) leaderboard = leaderboard.slice(-20000);
   persistLeaderboard();
 }
-function leaderboardSince(period) {
+function leaderboardSince(period, category) {
   const now = Date.now();
-  const cutoff = period === 'week' ? now - 7 * 24 * 60 * 60 * 1000 : period === 'month' ? now - 30 * 24 * 60 * 60 * 1000 : 0;
-  return leaderboard.filter(e => e.finishedAt >= cutoff);
+  let cutoff = 0;
+  if (period === 'today') { const d = new Date(now); d.setHours(0, 0, 0, 0); cutoff = d.getTime(); }
+  else if (period === 'week') cutoff = now - 7 * 24 * 60 * 60 * 1000;
+  else if (period === 'month') cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  return leaderboard.filter(e => e.finishedAt >= cutoff && (!category || e.category === category));
 }
 function aggregateLeaderboard(entries) {
   const byPlayer = new Map();
@@ -111,9 +114,10 @@ const server=http.createServer(async(req,res)=>{
   try {
     if(url.pathname==='/api/health' && req.method==='GET') return json(res,200,{ok:true,rooms:rooms.size,quizzes:quizzes.size,leaderboardEntries:leaderboard.length});
     if(url.pathname==='/api/leaderboard' && req.method==='GET'){
-      const period=['week','month','all'].includes(url.searchParams.get('period'))?url.searchParams.get('period'):'week';
+      const period=['today','week','month','all'].includes(url.searchParams.get('period'))?url.searchParams.get('period'):'week';
       const limit=Math.max(1,Math.min(100,Number(url.searchParams.get('limit'))||10));
-      const agg=aggregateLeaderboard(leaderboardSince(period));
+      const category=url.searchParams.get('category')||null;
+      const agg=aggregateLeaderboard(leaderboardSince(period,category));
       const top=agg.slice(0,limit).map((p,i)=>({rank:i+1,playerId:p.playerId,name:p.name,totalScore:p.totalScore,games:p.games,bestScore:p.bestScore}));
       const me=url.searchParams.get('playerId');
       let myRank=null;
