@@ -89,7 +89,7 @@ function tick(room) {
   if(room.status!=='playing') return;
   const now=Date.now();
   const allAnswered=room.players.length>0 && room.players.every(p=>room.answers[p.id]);
-  if(now>=room.deadline || (allAnswered && now>=room.allAnsweredAt+1200)) {
+  if(now>=room.deadline || (allAnswered && now>=room.allAnsweredAt+1700)) {
     room.questionIndex++;
     room.answers={}; room.allAnsweredAt=0;
     if(room.questionIndex>=room.questionCount){room.status='finished';room.deadline=0;if(!room.leaderboardLogged){room.leaderboardLogged=true;recordLeaderboardResult(room);}}
