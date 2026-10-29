@@ -1,0 +1,13 @@
+{
+  "name": "fikra-knowledge-game",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Arabic multiplayer quiz game with WhatsApp invitations",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check game.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
