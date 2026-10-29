@@ -5,10 +5,57 @@ const crypto = require('crypto');
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8000);
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
 const rooms = new Map();
 const quizzes = new Map();
+let leaderboard = []; // {id,playerId,name,score,category,mode,finishedAt}
 const QUESTION_SECONDS = 20;
 const MAX_PLAYERS = 24;
+
+/* ===== تخزين دائم مبسّط على القرص (JSON)، يُحمَّل عند الإقلاع ويُحفَظ بتأجيل قصير بعد كل تغيير ===== */
+function dataFile(name) { return path.join(DATA_DIR, name); }
+function loadJSON(name, fallback) {
+  try { const raw = fs.readFileSync(dataFile(name), 'utf8'); return JSON.parse(raw); } catch (e) { return fallback; }
+}
+function saveJSONNow(name, data) {
+  try { fs.writeFileSync(dataFile(name) + '.tmp', JSON.stringify(data)); fs.renameSync(dataFile(name) + '.tmp', dataFile(name)); } catch (e) { console.error('persist failed for', name, e.message); }
+}
+const _saveTimers = {};
+function saveJSONDebounced(name, getData, delay = 1500) {
+  clearTimeout(_saveTimers[name]);
+  _saveTimers[name] = setTimeout(() => saveJSONNow(name, getData()), delay);
+}
+function loadPersistedData() {
+  const savedQuizzes = loadJSON('quizzes.json', []);
+  for (const q of savedQuizzes) { if (q && q.code) quizzes.set(q.code, q); }
+  leaderboard = loadJSON('leaderboard.json', []);
+  console.log(`تحميل التخزين الدائم: ${quizzes.size} اختباراً، ${leaderboard.length} نتيجة في لوحة الصدارة (من ${DATA_DIR})`);
+}
+function persistQuizzes() { saveJSONDebounced('quizzes.json', () => Array.from(quizzes.values())); }
+function persistLeaderboard() { saveJSONDebounced('leaderboard.json', () => leaderboard); }
+function recordLeaderboardResult(room) {
+  const now = Date.now();
+  for (const p of room.players) {
+    leaderboard.push({ id: 'lb_' + crypto.randomBytes(6).toString('hex'), playerId: p.id, name: p.name, score: p.score, category: room.category, mode: room.mode, finishedAt: now });
+  }
+  if (leaderboard.length > 20000) leaderboard = leaderboard.slice(-20000);
+  persistLeaderboard();
+}
+function leaderboardSince(period) {
+  const now = Date.now();
+  const cutoff = period === 'week' ? now - 7 * 24 * 60 * 60 * 1000 : period === 'month' ? now - 30 * 24 * 60 * 60 * 1000 : 0;
+  return leaderboard.filter(e => e.finishedAt >= cutoff);
+}
+function aggregateLeaderboard(entries) {
+  const byPlayer = new Map();
+  for (const e of entries) {
+    let agg = byPlayer.get(e.playerId);
+    if (!agg) { agg = { playerId: e.playerId, name: e.name, totalScore: 0, games: 0, bestScore: 0 }; byPlayer.set(e.playerId, agg); }
+    agg.name = e.name; agg.totalScore += e.score; agg.games++; if (e.score > agg.bestScore) agg.bestScore = e.score;
+  }
+  return Array.from(byPlayer.values()).sort((a, b) => b.totalScore - a.totalScore);
+}
 const codeChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeCode() { let s=''; for(let i=0;i<6;i++) s+=codeChars[crypto.randomInt(codeChars.length)]; return s; }
 function makeQuizCode() { let s; do { s = makeCode(); } while (quizzes.has(s)); return s; }
@@ -42,7 +89,7 @@ function tick(room) {
   if(now>=room.deadline || (allAnswered && now>=room.allAnsweredAt+1200)) {
     room.questionIndex++;
     room.answers={}; room.allAnsweredAt=0;
-    if(room.questionIndex>=room.questionCount){room.status='finished';room.deadline=0;}
+    if(room.questionIndex>=room.questionCount){room.status='finished';room.deadline=0;if(!room.leaderboardLogged){room.leaderboardLogged=true;recordLeaderboardResult(room);}}
     else if(room.questionIndex%room.stageSize===0){room.status='intermission';room.questionStartedAt=0;room.deadline=0;}
     else{room.questionStartedAt=now;room.deadline=now+QUESTION_SECONDS*1000;}
   }
@@ -62,7 +109,17 @@ const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(req.method==='OPTIONS'){res.writeHead(204,{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type'});return res.end();}
   try {
-    if(url.pathname==='/api/health' && req.method==='GET') return json(res,200,{ok:true,rooms:rooms.size});
+    if(url.pathname==='/api/health' && req.method==='GET') return json(res,200,{ok:true,rooms:rooms.size,quizzes:quizzes.size,leaderboardEntries:leaderboard.length});
+    if(url.pathname==='/api/leaderboard' && req.method==='GET'){
+      const period=['week','month','all'].includes(url.searchParams.get('period'))?url.searchParams.get('period'):'week';
+      const limit=Math.max(1,Math.min(100,Number(url.searchParams.get('limit'))||10));
+      const agg=aggregateLeaderboard(leaderboardSince(period));
+      const top=agg.slice(0,limit).map((p,i)=>({rank:i+1,playerId:p.playerId,name:p.name,totalScore:p.totalScore,games:p.games,bestScore:p.bestScore}));
+      const me=url.searchParams.get('playerId');
+      let myRank=null;
+      if(me){const idx=agg.findIndex(p=>p.playerId===me);if(idx!==-1)myRank={rank:idx+1,...agg[idx]};}
+      return json(res,200,{period,total:agg.length,top,myRank});
+    }
     if(url.pathname==='/api/rooms' && req.method==='POST'){
       const b=await readBody(req); const id=String(b.playerId||'').slice(0,80); if(!id)return sendError(res,400,'معرّف اللاعب مطلوب');
       let code; do{code=makeCode()}while(rooms.has(code));
@@ -119,6 +176,7 @@ const server=http.createServer(async(req,res)=>{
       const code=makeQuizCode();
       const quiz={code,creatorId,title:String(b.title||'اختبار').trim().slice(0,80)||'اختبار',questions,submissions:[],createdAt:Date.now()};
       quizzes.set(code,quiz);
+      persistQuizzes();
       return json(res,201,safeQuizForCreator(quiz));
     }
     const qmatch=url.pathname.match(/^\/api\/quizzes\/([A-Z0-9]+)(?:\/(submit|results|export))?$/i);
@@ -142,6 +200,7 @@ const server=http.createServer(async(req,res)=>{
         const answers=Array.isArray(b.answers)?b.answers.slice(0,quiz.questions.length):[];
         let score=0; const details=quiz.questions.map((q,i)=>{const yourIndex=Number.isInteger(answers[i])?answers[i]:null;const correct=yourIndex===q.correct;if(correct)score++;return{correct,correctIndex:q.correct,yourIndex};});
         quiz.submissions.push({id:'s_'+crypto.randomBytes(6).toString('hex'),name,score,total:quiz.questions.length,submittedAt:Date.now()});
+        persistQuizzes();
         return json(res,200,{score,total:quiz.questions.length,details});
       }
       return sendError(res,405,'الطلب غير مدعوم.');
@@ -163,5 +222,6 @@ const server=http.createServer(async(req,res)=>{
     fs.readFile(file,(err,data)=>{if(err){res.writeHead(404,{'Content-Type':'text/plain; charset=utf-8'});return res.end('Not found');}const types={'.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.ico':'image/x-icon'};const isStatic=pathname.startsWith('/assets/')||ext==='.ico';res.writeHead(200,{'Content-Type':types[ext]||'application/octet-stream','Cache-Control':isStatic?'public, max-age=86400':'no-store'});res.end(data);});
   } catch(err){console.error(err);sendError(res,500,'حدث خطأ مؤقت في الخادم. حاول مرة أخرى.');}
 });
-setInterval(()=>{const cutoff=Date.now()-6*60*60*1000;for(const [c,r] of rooms){tick(r);if(r.createdAt<cutoff)rooms.delete(c)}const qcutoff=Date.now()-30*24*60*60*1000;for(const [c,q] of quizzes){if(q.createdAt<qcutoff)quizzes.delete(c)}},5000).unref();
-server.listen(PORT,'0.0.0.0',()=>console.log(`Fikra server listening on 0.0.0.0:${PORT}`));
+setInterval(()=>{const cutoff=Date.now()-6*60*60*1000;for(const [c,r] of rooms){tick(r);if(r.createdAt<cutoff)rooms.delete(c)}const qcutoff=Date.now()-30*24*60*60*1000;let removedQuiz=false;for(const [c,q] of quizzes){if(q.createdAt<qcutoff){quizzes.delete(c);removedQuiz=true;}}if(removedQuiz)persistQuizzes();},5000).unref();
+loadPersistedData();
+server.listen(PORT,'0.0.0.0',()=>console.log(`Fikra server listening on 0.0.0.0:${PORT} (DATA_DIR=${DATA_DIR})`));

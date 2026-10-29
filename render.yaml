@@ -5,3 +5,14 @@ services:
     plan: free
     healthCheckPath: /api/health
     autoDeploy: true
+    envVars:
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: fikra-data
+      mountPath: /data
+      sizeGB: 1
+    # ملاحظة: القرص الدائم (disk) غير متاح على الخطة المجانية في Render — يظهر فقط بعد ترقية
+    # نوع الخدمة إلى خطة مدفوعة (Starter فما فوق). بدونه يعمل التطبيق تماماً كما هو، لكن
+    # الاختبارات التعليمية ولوحة الصدارة تُفقد كل مرة يُعاد تشغيل الخادم (عند كل إعادة نشر
+    # أو بعد فترة سكون طويلة على الخطة المجانية).
